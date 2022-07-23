@@ -19,19 +19,32 @@ type httpClient interface {
 }
 type fetcher struct {
 	client        httpClient
-	tokenProvider *tokenProvider
+	tokenProvider tokenProvider
 	token         string
 }
 
-type tokenProvider struct {
-	client httpClient
+type tokenProvider interface {
+	Token() (string, error)
 }
+
+var errTokenProviderNotAvailable = errors.New("token provider not available")
 
 func main() {
 	client := &http.Client{
 		Timeout: time.Second * 5,
 	}
-	filter(fetcher{client, &tokenProvider{client}, ""}, os.Stdin, os.Stdout)
+
+	tokenProvider := tokenProviderChain{
+		[]tokenProvider{
+			&clientCredentialTokenProvider{
+				client:       client,
+				clientId:     os.Getenv("VAULTENV_AZURE_USER"),
+				clientSecret: os.Getenv("VAULTENV_AZURE_PASSWORD"),
+				tenant:       os.Getenv("VAULTENV_AZURE_TENANT"),
+			},
+			&vmIdentityTokenProvider{client},
+		}}
+	filter(fetcher{client, &tokenProvider, ""}, os.Stdin, os.Stdout)
 }
 
 func filter(f fetcher, in io.Reader, out io.Writer) {
@@ -103,21 +116,49 @@ func (f *fetcher) getToken() (string, error) {
 	return token, nil
 }
 
-func (p *tokenProvider) Token() (string, error) {
-	var req *http.Request
-	if clientId := os.Getenv("VAULTENV_AZURE_USER"); clientId != "" {
-		values := url.Values{}
-		values.Set("grant_type", "client_credentials")
-		values.Add("client_id", clientId)
-		values.Add("client_secret", os.Getenv("VAULTENV_AZURE_PASSWORD"))
-		values.Add("resource", "https://vault.azure.net")
-		req, _ = http.NewRequest("GET", fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/token", os.Getenv("VAULTENV_AZURE_TENANT")), strings.NewReader(values.Encode()))
-		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	} else {
-		req, _ = http.NewRequest("GET", "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2019-06-04&resource=https%3A%2F%2Fvault.azure.net", nil)
-		req.Header.Add("Metadata", "true")
+type clientCredentialTokenProvider struct {
+	client       httpClient
+	clientId     string
+	clientSecret string
+	tenant       string
+}
+
+func (p *clientCredentialTokenProvider) Token() (string, error) {
+	if p.clientId == "" {
+		return "", errTokenProviderNotAvailable
 	}
-	res, err := p.client.Do(req)
+
+	values := url.Values{}
+	values.Set("grant_type", "client_credentials")
+	values.Add("client_id", p.clientId)
+	values.Add("client_secret", p.clientSecret)
+	values.Add("resource", "https://vault.azure.net")
+	req, err := http.NewRequest("GET", fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/token", p.tenant), strings.NewReader(values.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	return fetchToken(p.client, req)
+}
+
+type vmIdentityTokenProvider struct {
+	client httpClient
+}
+
+func (p *vmIdentityTokenProvider) Token() (string, error) {
+	req, err := http.NewRequest("GET", "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2019-06-04&resource=https%3A%2F%2Fvault.azure.net", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Add("Metadata", "true")
+	return fetchToken(p.client, req)
+}
+
+func fetchToken(client httpClient, req *http.Request) (string, error) {
+	res, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
 	if res.StatusCode != 200 {
 		return "", errors.New(res.Status)
 	}
@@ -126,9 +167,28 @@ func (p *tokenProvider) Token() (string, error) {
 		Token string `json:"access_token"`
 	}
 	decoder := json.NewDecoder(res.Body)
-	if err = decoder.Decode(&auth); err != nil {
-		return "", err
+	if err := decoder.Decode(&auth); err != nil {
+		return "", fmt.Errorf("failed to decode token: %w", err)
 	}
 
 	return auth.Token, nil
+}
+
+type tokenProviderChain struct {
+	providers []tokenProvider
+}
+
+func (p *tokenProviderChain) Token() (string, error) {
+	for _, provider := range p.providers {
+		token, err := provider.Token()
+		if errors.Is(err, errTokenProviderNotAvailable) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("%T: %w", provider, err)
+		}
+		return token, nil
+	}
+
+	return "", errTokenProviderNotAvailable
 }
