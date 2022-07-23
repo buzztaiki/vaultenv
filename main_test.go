@@ -66,6 +66,11 @@ func (c *dummyClient) Do(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
+func setupTestFetcher() fetcher {
+	client := &dummyClient{}
+	return fetcher{client, &tokenProvider{client}, ""}
+}
+
 func TestValidTemplateWithVmIdentity(t *testing.T) {
 	var b bytes.Buffer
 	template := `USER=foo@example.com
@@ -74,9 +79,8 @@ PASSWORD={{ kv "https://example.vault.azure.net/secrets/pass" }}
 	expected := `USER=foo@example.com
 PASSWORD=mysecretvalue1
 `
-	client := &dummyClient{}
 	r := strings.NewReader(template)
-	filter(fetcher{client, ""}, r, &b)
+	filter(setupTestFetcher(), r, &b)
 	if b.String() != expected {
 		t.Fatalf("got:%s want:%s", b.String(), expected)
 	}
@@ -94,9 +98,8 @@ PASSWORD={{ kv "https://example.vault.azure.net/secrets/pass" }}
 	expected := `USER=foo@example.com
 PASSWORD=mysecretvalue2
 `
-	client := &dummyClient{}
 	r := strings.NewReader(template)
-	filter(fetcher{client, ""}, r, &b)
+	filter(setupTestFetcher(), r, &b)
 	if b.String() != expected {
 		t.Fatalf("got:%s want:%s", b.String(), expected)
 	}
@@ -107,12 +110,11 @@ func TestInvalidUrl(t *testing.T) {
 	template := `USER=foo@example.com
 PASSWORD={{ kv "https://invalid.sensyn.net/secrets/pass" }}
 `
-	client := &dummyClient{}
 	r := strings.NewReader(template)
 	defer func() {
 		recover()
 	}()
-	filter(fetcher{client, ""}, r, &b)
+	filter(setupTestFetcher(), r, &b)
 	t.Fatalf("must be panic")
 }
 
@@ -126,9 +128,8 @@ PASSWORD=mysecretvalue1
 
 PASSWORD=mysecretvalue1
 `
-	client := &dummyClient{}
 	r := strings.NewReader(template)
-	filter(fetcher{client, ""}, r, &b)
+	filter(setupTestFetcher(), r, &b)
 	if b.String() != expected {
 		t.Fatalf("got:%s want:%s", b.String(), expected)
 	}

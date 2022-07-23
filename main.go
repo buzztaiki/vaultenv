@@ -18,15 +18,20 @@ type httpClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 type fetcher struct {
+	client        httpClient
+	tokenProvider *tokenProvider
+	token         string
+}
+
+type tokenProvider struct {
 	client httpClient
-	token  string
 }
 
 func main() {
 	client := &http.Client{
 		Timeout: time.Second * 5,
 	}
-	filter(fetcher{client, ""}, os.Stdin, os.Stdout)
+	filter(fetcher{client, &tokenProvider{client}, ""}, os.Stdin, os.Stdout)
 }
 
 func filter(f fetcher, in io.Reader, out io.Writer) {
@@ -90,6 +95,15 @@ func (f *fetcher) getToken() (string, error) {
 	if f.token != "" {
 		return f.token, nil
 	}
+	token, err := f.tokenProvider.Token()
+	if err != nil {
+		return "", fmt.Errorf("failed to get token: %w", err)
+	}
+	f.token = token
+	return token, nil
+}
+
+func (p *tokenProvider) Token() (string, error) {
 	var req *http.Request
 	if clientId := os.Getenv("VAULTENV_AZURE_USER"); clientId != "" {
 		values := url.Values{}
@@ -103,7 +117,7 @@ func (f *fetcher) getToken() (string, error) {
 		req, _ = http.NewRequest("GET", "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2019-06-04&resource=https%3A%2F%2Fvault.azure.net", nil)
 		req.Header.Add("Metadata", "true")
 	}
-	res, err := f.client.Do(req)
+	res, err := p.client.Do(req)
 	if res.StatusCode != 200 {
 		return "", errors.New(res.Status)
 	}
@@ -115,7 +129,6 @@ func (f *fetcher) getToken() (string, error) {
 	if err = decoder.Decode(&auth); err != nil {
 		return "", err
 	}
-	f.token = auth.Token
 
 	return auth.Token, nil
 }
