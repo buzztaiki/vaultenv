@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 )
@@ -76,6 +79,80 @@ func TestClientCredentialTokenProvider(t *testing.T) {
 		}
 		if want := "TOKEN_WITH_CLIENT_CREDENTIAL"; token != want {
 			t.Errorf("got:%s, want:%s", token, want)
+		}
+	})
+}
+
+func dummyAzureCli(t *testing.T, causeError bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	file, err := os.CreateTemp(dir, "az")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var script string
+	if causeError {
+		script = `#!/bin/sh
+echo "awesome error" 1>&2
+exit 1
+`
+	} else {
+		script = `#!/bin/sh
+cat <<EOF
+{
+  "accessToken": "TOKEN_AZURE_CLI",
+  "expiresOn": "2022-07-23 17:09:37.000000",
+  "subscription": "5bab72bd-8a68-4779-afba-9e5faefff2d7",
+  "tenant": "3d648c03-b04a-4fbb-92b6-6eeb2c83d1f7",
+  "tokenType": "Bearer"
+}
+EOF
+`
+	}
+
+	if err := os.WriteFile(file.Name(), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file.Name(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return file.Name()
+}
+
+func TestAzureCliTokenProvider(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		provicer := &azureCliTokenProvider{dummyAzureCli(t, false)}
+		token, err := provicer.Token()
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantToken := "TOKEN_AZURE_CLI"
+		if token != wantToken {
+			t.Errorf("got:%q want:%q", token, wantToken)
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		az := dummyAzureCli(t, true)
+		provicer := &azureCliTokenProvider{az}
+		_, err := provicer.Token()
+		if err != nil {
+			if !strings.Contains(err.Error(), fmt.Sprintf("failed to run %s: awesome error", az)) {
+				t.Errorf("got:%v", err)
+			}
+		} else {
+			t.Errorf("must be error")
+		}
+	})
+	t.Run("not found", func(t *testing.T) {
+		az := fmt.Sprintf("az-%d-%d", rand.Int(), os.Getpid())
+		provicer := &azureCliTokenProvider{az}
+		_, err := provicer.Token()
+		if want := errTokenProviderNotAvailable; !errors.Is(err, want) {
+			t.Errorf("got:%q want:%q", err, want)
 		}
 	})
 }

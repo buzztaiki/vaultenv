@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"text/template"
 	"time"
@@ -42,6 +44,7 @@ func main() {
 				clientSecret: os.Getenv("VAULTENV_AZURE_PASSWORD"),
 				tenant:       os.Getenv("VAULTENV_AZURE_TENANT"),
 			},
+			&azureCliTokenProvider{"az"},
 			&vmIdentityTokenProvider{client},
 		}}
 	filter(fetcher{client, &tokenProvider, ""}, os.Stdin, os.Stdout)
@@ -171,6 +174,37 @@ func fetchToken(client httpClient, req *http.Request) (string, error) {
 		return "", fmt.Errorf("failed to decode token: %w", err)
 	}
 
+	return auth.Token, nil
+}
+
+type azureCliTokenProvider struct {
+	az string
+}
+
+func (p *azureCliTokenProvider) Token() (string, error) {
+	_, err := exec.LookPath(p.az)
+	if errors.Is(err, exec.ErrNotFound) {
+		return "", errTokenProviderNotAvailable
+	}
+	if err != nil {
+		return "", err
+	}
+
+	cmd := exec.Command(p.az, "account", "get-access-token", "--resource", "https://vault.azure.net")
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to run %s: %s: %w", p.az, stderr.String(), err)
+	}
+
+	var auth struct {
+		Token string `json:"accessToken"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &auth); err != nil {
+		return "", fmt.Errorf("failed to decode token: %w", err)
+	}
 	return auth.Token, nil
 }
 
