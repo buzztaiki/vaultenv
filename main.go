@@ -189,12 +189,10 @@ type azureCliTokenProvider struct {
 }
 
 func (p *azureCliTokenProvider) Token() (string, error) {
-	_, err := exec.LookPath(p.az)
-	if errors.Is(err, exec.ErrNotFound) {
+	testCmd := exec.Command(p.az, "account", "show", "--output", "none")
+	if err := testCmd.Run(); err != nil {
+		// az command not found or not logged in
 		return "", errTokenProviderNotAvailable
-	}
-	if err != nil {
-		return "", err
 	}
 
 	cmd := exec.Command(p.az, "account", "get-access-token", "--resource", "https://vault.azure.net")

@@ -96,13 +96,24 @@ func dummyAzureCli(t *testing.T, causeError bool) string {
 
 	var script string
 	if causeError {
-		script = `#!/bin/sh
-echo "awesome error" 1>&2
-exit 1
+		script = `#!/bin/bash
+case "$*" in
+  "account show --output none")
+    exit 0
+    ;;
+  *)
+    echo "awesome error" 1>&2
+    exit 2
+esac
 `
 	} else {
-		script = `#!/bin/sh
-cat <<EOF
+		script = `#!/bin/bash
+case "$*" in
+  "account show --output none")
+    exit 0
+    ;;
+  "account get-access-token --resource https://vault.azure.net")
+    cat <<EOF
 {
   "accessToken": "TOKEN_AZURE_CLI",
   "expiresOn": "2022-07-23 17:09:37.000000",
@@ -111,6 +122,11 @@ cat <<EOF
   "tokenType": "Bearer"
 }
 EOF
+    ;;
+  *)
+    echo "invalid arguments $*" 1>&2
+    exit 2
+esac
 `
 	}
 
