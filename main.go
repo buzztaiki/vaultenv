@@ -138,7 +138,7 @@ func (p *clientCredentialTokenProvider) Token() (string, error) {
 	values.Add("resource", "https://vault.azure.net")
 	req, err := http.NewRequest("GET", fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/token", p.tenant), strings.NewReader(values.Encode()))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to create token request: %w", err)
 	}
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	return fetchToken(p.client, req)
@@ -162,10 +162,17 @@ func fetchToken(client httpClient, req *http.Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if res.StatusCode != 200 {
-		return "", errors.New(res.Status)
-	}
 	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		var errorBody struct {
+			Error            string `json:"error"`
+			ErrorDescription string `json:"error_description"`
+		}
+		if err := json.NewDecoder(res.Body).Decode(&errorBody); err != nil {
+			return "", fmt.Errorf("failed to read error response (%s): %w", res.Status, err)
+		}
+		return "", fmt.Errorf("%s: %s", errorBody.Error, errorBody.ErrorDescription)
+	}
 	var auth struct {
 		Token string `json:"access_token"`
 	}
