@@ -2,31 +2,61 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
-	"errors"
+	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"text/template"
-	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/keyvault/azsecrets"
+	"github.com/hashicorp/go-multierror"
 )
 
-type httpClient interface {
-	Do(req *http.Request) (*http.Response, error)
-}
 type fetcher struct {
-	client httpClient
-	token  string
+	clientCache map[string]*azsecrets.Client
+	cred        azcore.TokenCredential
 }
 
 func main() {
-	client := &http.Client{
-		Timeout: time.Second * 5,
+	cred, err := newCredential()
+	if err != nil {
+		panic(err)
 	}
-	filter(fetcher{client, ""}, os.Stdin, os.Stdout)
+	filter(fetcher{map[string]*azsecrets.Client{}, cred}, os.Stdin, os.Stdout)
+}
+
+func newCredential() (azcore.TokenCredential, error) {
+	var errs error
+	var creds []azcore.TokenCredential
+
+	secretCred, err := azidentity.NewClientSecretCredential(
+		os.Getenv("VAULTENV_AZURE_TENANT"),
+		os.Getenv("VAULTENV_AZURE_USER"),
+		os.Getenv("VAULTENV_AZURE_PASSWORD"),
+		nil,
+	)
+	if err != nil {
+		errs = multierror.Append(errs, err)
+	} else {
+		creds = append(creds, secretCred)
+	}
+
+	baseCred, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		errs = multierror.Append(errs, err)
+	} else {
+		creds = append(creds, baseCred)
+	}
+
+	if len(creds) == 0 {
+		return nil, errs
+	}
+
+	return azidentity.NewChainedTokenCredential(creds, nil)
 }
 
 func filter(f fetcher, in io.Reader, out io.Writer) {
@@ -50,72 +80,46 @@ func filter(f fetcher, in io.Reader, out io.Writer) {
 }
 
 func (f *fetcher) fetch(rawurl string) (string, error) {
-	url, err := url.Parse(rawurl)
+	u, err := url.Parse(rawurl)
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasSuffix(url.Hostname(), "vault.azure.net") {
-		return "", fmt.Errorf("Invalid url - %s", rawurl)
-	}
-	b, err := f.getToken()
+	client, err := f.getClient((&url.URL{Scheme: u.Scheme, Host: u.Host}).String())
 	if err != nil {
-		return "", err
-	}
-	req, err := http.NewRequest("GET", rawurl+"?api-version=7.0", nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Add("Authorization", "Bearer "+b)
-	req.Header.Add("Accept", "application/json")
-	res, err := f.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	if res.StatusCode != 200 {
-		return "", fmt.Errorf("GET %s - %s", url, res.Status)
-	}
-	defer res.Body.Close()
-	var result struct {
-		Value string `json:"value"`
-	}
-	decoder := json.NewDecoder(res.Body)
-	if err = decoder.Decode(&result); err != nil {
 		return "", err
 	}
 
-	return result.Value, nil
+	// https://kv.vault.azure.net/secrets/secretName
+	// https://kv.vault.azure.net/secrets/secretName/version
+	pathElems := strings.Split(u.Path, "/")[2:]
+
+	var name, version string
+	switch len(pathElems) {
+	case 1:
+		name = pathElems[0]
+	case 2:
+		name = pathElems[0]
+		version = pathElems[1]
+	default:
+		return "", fmt.Errorf("invalid path: %q", u.Path)
+	}
+
+	secret, err := client.GetSecret(context.Background(), name, version, nil)
+	if err != nil {
+		return "", err
+	}
+	return *secret.Value, nil
 }
 
-func (f *fetcher) getToken() (string, error) {
-	if f.token != "" {
-		return f.token, nil
+func (f *fetcher) getClient(vaultURL string) (*azsecrets.Client, error) {
+	if client, ok := f.clientCache[vaultURL]; ok {
+		return client, nil
 	}
-	var req *http.Request
-	if clientId := os.Getenv("VAULTENV_AZURE_USER"); clientId != "" {
-		values := url.Values{}
-		values.Set("grant_type", "client_credentials")
-		values.Add("client_id", clientId)
-		values.Add("client_secret", os.Getenv("VAULTENV_AZURE_PASSWORD"))
-		values.Add("resource", "https://vault.azure.net")
-		req, _ = http.NewRequest("GET", fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/token", os.Getenv("VAULTENV_AZURE_TENANT")), strings.NewReader(values.Encode()))
-		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	} else {
-		req, _ = http.NewRequest("GET", "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2019-06-04&resource=https%3A%2F%2Fvault.azure.net", nil)
-		req.Header.Add("Metadata", "true")
-	}
-	res, err := f.client.Do(req)
-	if res.StatusCode != 200 {
-		return "", errors.New(res.Status)
-	}
-	defer res.Body.Close()
-	var auth struct {
-		Token string `json:"access_token"`
-	}
-	decoder := json.NewDecoder(res.Body)
-	if err = decoder.Decode(&auth); err != nil {
-		return "", err
-	}
-	f.token = auth.Token
 
-	return auth.Token, nil
+	client, err := azsecrets.NewClient(vaultURL, f.cred, nil)
+	if err != nil {
+		return nil, err
+	}
+	f.clientCache[vaultURL] = client
+	return client, nil
 }
